@@ -211,6 +211,11 @@ react:
     research_agent:
       enabled: false
       # max_iterations: 15
+    browser_agent:
+      enabled: false
+      # Browser-only workflow Skill; parent team agents exclude it.
+      skills:
+        - browser-task
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000

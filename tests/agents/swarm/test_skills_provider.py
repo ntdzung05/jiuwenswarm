@@ -44,6 +44,7 @@ def _make_context(
     *,
     member_name: str = "coder",
     team_id: str = "unit-team",
+    config: dict | None = None,
 ) -> SwarmBuildContext:
     """Build a context whose member workspace lives under *tmp_path*."""
     member_root = tmp_path / "workspaces" / f"{member_name}_workspace"
@@ -57,6 +58,7 @@ def _make_context(
         global_skills_dir=str(tmp_path / "library"),
         member_name=member_name,
         workspace=SimpleNamespace(root_path=str(member_root)),
+        config=config,
     )
 
 
@@ -173,6 +175,156 @@ def test_member_visibility_provider_composes_member_team_and_global(
     # The metadata files are part of the rail's snapshot signature.
     signed_paths = {entry[0] for entry in provider.metadata_signature()}
     assert signed_paths == {str(member_path), str(team_path)}
+
+
+def test_browser_child_skill_is_transiently_denied_across_team_visibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team parent excludes browser Skills without persisting a deny."""
+
+    context = _make_context(
+        tmp_path,
+        config={
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task"]},
+                }
+            }
+        },
+    )
+    member_path = Path(context.resolve_member_skill_visibility_path())
+    set_skill_visibility(
+        member_path,
+        scope=SCOPE_MEMBER,
+        entity_id="coder",
+        allow=["alpha", "browser-task"],
+        deny=[],
+    )
+    monkeypatch.setattr(skills, "_load_global_disabled_skills", lambda: ["blocked"])
+    monkeypatch.setattr(skills, "get_config", lambda: context.config)
+
+    provider = skills.build_member_skill_visibility_provider(context)
+    enabled, disabled = provider()
+
+    assert enabled == {"alpha", "browser-task"}
+    assert disabled == {"blocked", "browser-task"}
+    persisted = read_skill_visibility(
+        member_path,
+        scope=SCOPE_MEMBER,
+        entity_id="coder",
+    )
+    assert persisted.deny == []
+
+
+def test_actual_team_skill_rail_uses_parent_exclusion_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registered rail behavior agrees with list/retrieval visibility."""
+
+    library = tmp_path / "library"
+    for name in ("alpha", "browser-task"):
+        skill_dir = library / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\ndescription: {name}\n---\n",
+            encoding="utf-8",
+        )
+    context = _make_context(
+        tmp_path,
+        config={
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task"]},
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(skills, "_load_global_disabled_skills", list)
+    monkeypatch.setattr(skills, "get_config", lambda: context.config)
+
+    rail = skills.build_member_team_skill_use_rail(
+        {
+            "member_visibility_path": context.resolve_member_skill_visibility_path(),
+            "team_visibility_path": context.team_skill_visibility_path,
+            "member_name": context.member_name,
+            "team_name": context.team_id,
+            "skills_dir": [str(library)],
+            "bootstrap_allow": [],
+            "skill_mode": "all",
+            "include_tools": False,
+        },
+        context,
+    )
+
+    assert rail is not None
+    assert rail.disabled_skills == {"browser-task"}
+    enabled, disabled = rail.visibility_provider()
+    assert enabled == set()
+    assert disabled == {"browser-task"}
+
+
+def test_team_skill_rail_tracks_live_browser_child_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One live rail adopts additions and removals from config hot reloads."""
+
+    library = tmp_path / "library"
+    for name in ("browser-old", "browser-new"):
+        skill_dir = library / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\ndescription: {name}\n---\n",
+            encoding="utf-8",
+        )
+
+    current_config = {
+        "value": {
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-old"]},
+                }
+            }
+        }
+    }
+    context = _make_context(tmp_path, config=current_config["value"])
+    monkeypatch.setattr(skills, "_load_global_disabled_skills", list)
+    monkeypatch.setattr(skills, "get_config", lambda: current_config["value"])
+
+    rail = skills.build_member_team_skill_use_rail(
+        {
+            "member_visibility_path": context.resolve_member_skill_visibility_path(),
+            "team_visibility_path": context.team_skill_visibility_path,
+            "member_name": context.member_name,
+            "team_name": context.team_id,
+            "skills_dir": [str(library)],
+            "bootstrap_allow": [],
+            "skill_mode": "all",
+            "include_tools": False,
+        },
+        context,
+    )
+
+    assert rail is not None
+    assert rail.disabled_skills == {"browser-old"}
+
+    current_config["value"] = {
+        "react": {
+            "subagents": {
+                "browser_agent": {"skills": ["browser-new"]},
+            }
+        }
+    }
+    rail._apply_visibility()
+    assert rail.disabled_skills == {"browser-new"}
+
+    current_config["value"] = {
+        "react": {"subagents": {"browser_agent": {"skills": []}}}
+    }
+    rail._apply_visibility()
+    assert rail.disabled_skills == set()
 
 
 def test_member_visibility_provider_reflects_revocation_without_rebuild(

@@ -25,7 +25,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterable, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
@@ -187,6 +187,10 @@ from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
 )
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    build_browser_agent_skill_rail,
+    compose_parent_disabled_skill_names,
+    configured_browser_agent_skill_names,
+    normalize_browser_agent_skill_names,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
 from jiuwenswarm.agents.harness.code.rails.heartbeat_rail import HeartbeatRail
@@ -3673,11 +3677,19 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
                     "defaulting to managed mode"
                 )
+            browser_skill_names = normalize_browser_agent_skill_names(
+                browser_agent_cfg
+            )
+            browser_skill_rail = build_browser_agent_skill_rail(
+                get_agent_skills_dir(),
+                browser_skill_names,
+            )
             browser_spec = build_browser_agent_config(
                 model,
                 workspace=workspace,
                 sys_operation=sys_operation,
                 language=resolved_language,
+                rails=[browser_skill_rail] if browser_skill_rail else None,
                 max_iterations=parse_int(
                     (
                         browser_agent_cfg.get("max_iterations")
@@ -4739,9 +4751,13 @@ class JiuWenSwarmDeepAdapter:
         intersects it with Skills that are currently present.
         """
 
-        manager = self._skill_manager
+        routing_config = getattr(self, "_config_base_cache", None) or getattr(
+            self, "_config_cache", None
+        )
+        disabled = set(configured_browser_agent_skill_names(routing_config))
+        manager = getattr(self, "_skill_manager", None)
         if manager is None:
-            return []
+            return sorted(disabled)
         reload_state = getattr(manager, "reload_state", None)
         if callable(reload_state):
             try:
@@ -4760,16 +4776,19 @@ class JiuWenSwarmDeepAdapter:
                 None,
             )
         if not callable(list_disabled):
-            return []
+            return sorted(disabled)
         try:
-            return [str(name) for name in list_disabled() if str(name).strip()]
+            disabled.update(
+                str(name) for name in list_disabled() if str(name).strip()
+            )
+            return sorted(disabled)
         except Exception:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] failed to read disabled Skills "
                 "before retrieval",
                 exc_info=True,
             )
-            return []
+            return sorted(disabled)
 
     def _get_or_create_skill_retrieval_toolkit(self) -> SkillRetrievalToolkit:
         toolkit = self._skill_retrieval_toolkit
@@ -6443,11 +6462,15 @@ class JiuWenSwarmDeepAdapter:
             )
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skills_dirs = self._skill_scan_dirs()
+            disabled_skills = set(
+                self._skill_manager.list_execution_disabled_skills()
+            )
+            disabled_skills.update(configured_browser_agent_skill_names(config))
             skill_rail = SkillUseRail(
                 skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
-                disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                disabled_skills=disabled_skills,
             )
             logger.info("[JiuWenSwarmDeepAdapter] SkillUseRail create success")
         except Exception as exc:
@@ -6500,6 +6523,11 @@ class JiuWenSwarmDeepAdapter:
         try:
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
+            routing_config = getattr(self, "_config_base_cache", None) or config
+            disabled_skills = compose_parent_disabled_skill_names(
+                routing_config,
+                self._skill_manager.list_execution_disabled_skills(),
+            )
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=self._skill_scan_dirs(),
                 llm=self._model,
@@ -6508,7 +6536,7 @@ class JiuWenSwarmDeepAdapter:
                 signal_trigger=False,
                 auto_save=evolution_auto_save,
                 review_trigger=True,
-                disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                disabled_skills=disabled_skills,
                 trajectory_span_processor=get_trajectory_span_processor(),
             )
             self._skill_evolution_rail = skill_evolution_rail
@@ -6537,6 +6565,13 @@ class JiuWenSwarmDeepAdapter:
             self._skill_manager.list_execution_disabled_skills()
             if self._skill_manager is not None
             else []
+        )
+        routing_config = getattr(self, "_config_base_cache", None) or getattr(
+            self, "_config_cache", None
+        )
+        disabled_skills = compose_parent_disabled_skill_names(
+            routing_config,
+            disabled_skills,
         )
         from openjiuwen.extensions.observability.demand import (
             get_trajectory_span_processor,
@@ -7052,6 +7087,10 @@ class JiuWenSwarmDeepAdapter:
         if _list_disabled is None:
             _list_disabled = getattr(sm, "list_execution_disabled_skills", lambda: [])
         new_disabled = set(_list_disabled())
+        routing_config = getattr(self, "_config_base_cache", None) or getattr(
+            self, "_config_cache", None
+        )
+        new_disabled.update(configured_browser_agent_skill_names(routing_config))
         # Rebuild the rail's scan roots from scratch (agent skills dir +
         # currently-connected MCP skill dirs). Previously this preserved the
         # rail's existing roots and only appended new MCP dirs, so a
@@ -7105,11 +7144,10 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_evolution_rail.skills_dir = skills_dirs
             except (AttributeError, TypeError):
                 pass
-            if getattr(self._skill_evolution_rail, "disabled_skills", None) != new_disabled:
-                try:
-                    self._skill_evolution_rail.disabled_skills = new_disabled
-                except (AttributeError, TypeError):
-                    pass
+            self._replace_skill_evolution_disabled_skills(
+                self._skill_evolution_rail,
+                new_disabled,
+            )
         # Propagate to live session child adapters — each has its own
         # SkillUseRail that caches the skill set. An MCP's bundled skills were
         # installed via skill_installer (writes skill_state.json + copies dirs),
@@ -7149,6 +7187,32 @@ class JiuWenSwarmDeepAdapter:
             loop_session.update_state({"skill_use": None})
         except Exception:  # noqa: BLE001
             pass
+
+    @staticmethod
+    def _replace_skill_evolution_disabled_skills(
+        rail: SkillEvolutionRail,
+        disabled_skills: Iterable[str],
+    ) -> None:
+        """Replace a live evolution rail's deny-list through its mutable view.
+
+        ``EvolutionRail.disabled_skills`` intentionally exposes a getter-only
+        set.  Mutating that set in place keeps library disable switches and
+        browser-child-only routing authoritative without rebuilding the rail
+        or relying on an assignment that the property rejects.
+        """
+
+        disabled = set(disabled_skills)
+        current = getattr(rail, "disabled_skills", None)
+        if not isinstance(current, set):
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] skill evolution rail does not expose "
+                "a mutable disabled_skills set"
+            )
+            return
+        if current == disabled:
+            return
+        current.clear()
+        current.update(disabled)
 
     def _build_symphony_orchestration_rail(
         self,
@@ -7517,11 +7581,29 @@ class JiuWenSwarmDeepAdapter:
         and are updated in-place where needed — they are NOT passed to configure()
         so their existing registered state is preserved without an uninit/init cycle.
         """
+        routing_config = config_base if isinstance(config_base, dict) else config
+        skill_manager = getattr(self, "_skill_manager", None)
+        library_disabled = (
+            skill_manager.list_execution_disabled_skills()
+            if skill_manager is not None
+            else []
+        )
+        parent_disabled = set(
+            compose_parent_disabled_skill_names(
+                routing_config,
+                library_disabled,
+            )
+        )
+
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
             self._skill_evolution_rail.auto_save = get_evolution_auto_save_enabled(
                 config_base or self._config_base_cache or config
+            )
+            self._replace_skill_evolution_disabled_skills(
+                self._skill_evolution_rail,
+                parent_disabled,
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -7547,9 +7629,12 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_rail.skill_mode != new_skill_mode:
                 self._skill_rail.skill_mode = new_skill_mode
             # Update disabled_skills.
-            new_disabled = set(self._skill_manager.list_execution_disabled_skills())
-            if self._skill_rail.disabled_skills != new_disabled:
-                self._skill_rail.disabled_skills = new_disabled
+            if self._skill_rail.disabled_skills != parent_disabled:
+                self._skill_rail.disabled_skills = parent_disabled
+                # A persisted SkillUseRail baseline would otherwise keep a
+                # newly child-only Skill invokable for the rest of the parent
+                # session after hot reload.
+                self._clear_skill_session_baseline()
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None

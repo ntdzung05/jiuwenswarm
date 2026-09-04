@@ -70,3 +70,19 @@ def test_default_skill_evolution_switch_is_disabled():
         assert evolution["skill_evolution"] is False
         assert evolution["auto_save"] is False
         assert evolution["review_feedback_min_confidence"] == 0.7
+
+
+def test_all_shipped_configs_route_browser_task_skill_to_browser_child():
+    repo_root = Path(__file__).resolve().parents[2]
+    config_files = {
+        repo_root / "jiuwenswarm" / "resources" / "config.yaml": True,
+        repo_root / "jiuwenswarm" / "resources" / "config.team.distributed.leader.yaml": False,
+        repo_root / "jiuwenswarm" / "resources" / "config.team.distributed.teammate.yaml": False,
+    }
+
+    for config_file, expected_enabled in config_files.items():
+        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        browser = data["react"]["subagents"]["browser_agent"]
+
+        assert browser["enabled"] is expected_enabled
+        assert browser["skills"] == ["browser-task"]

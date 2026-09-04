@@ -67,6 +67,46 @@ def _read_state(ws_dir: Path) -> dict:
     return json.loads((ws_dir / "recommendation.json").read_text(encoding="utf-8"))
 
 
+def test_skill_inventory_hides_browser_child_only_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.recommendation import proactive_actions
+    from jiuwenswarm.common import utils
+    from jiuwenswarm.server.runtime.skill import skilldev
+
+    skills_root = tmp_path / "skills"
+    builtin_root = tmp_path / "builtin-skills"
+    builtin_root.mkdir()
+    for name in ("ordinary-skill", "browser-task"):
+        skill_dir = skills_root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: test\n---\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(utils, "get_agent_skills_dir", lambda: skills_root)
+    monkeypatch.setattr(utils, "get_builtin_skills_dir", lambda: builtin_root)
+    monkeypatch.setattr(skilldev, "load_execution_disabled_skills", lambda: [])
+    monkeypatch.setattr(
+        proactive_actions,
+        "get_config",
+        lambda: {
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task"]},
+                }
+            }
+        },
+    )
+
+    installed_names, skills = proactive_actions._get_all_skills()
+
+    assert installed_names == {"ordinary-skill"}
+    assert [skill["name"] for skill in skills] == ["ordinary-skill"]
+
+
 class _MockProactiveAgent:
     """Mock dedicated agent: invoke() returns {"output": <JSON string>}."""
 
@@ -418,6 +458,35 @@ async def test_proactive_agent_output_parsed_to_decision():
     assert result.decision.type == "skill_recommend"
     assert result.decision.target == "auto-test-runner"
     assert result.decision.urgency == 0.7
+
+
+@pytest.mark.asyncio
+async def test_proactive_agent_rejects_browser_child_only_skill() -> None:
+    from jiuwenswarm.agents.harness.common.recommendation.proactive_actions import (
+        _analyze_and_decide,
+    )
+
+    dedicated = _make_proactive_agent(
+        [
+            {
+                "decision": {
+                    "type": "skill_recommend",
+                    "target": "browser-task",
+                    "reason": "requires browser automation",
+                    "urgency": 0.7,
+                },
+            }
+        ]
+    )
+
+    result = await _analyze_and_decide(
+        "report text",
+        MagicMock(),
+        [{"name": "ordinary-skill", "description": "ordinary"}],
+        dedicated,
+    )
+
+    assert result.decision is None
 
 
 @pytest.mark.asyncio

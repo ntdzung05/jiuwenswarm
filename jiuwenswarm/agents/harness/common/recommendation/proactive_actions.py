@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     # 仅类型注解用，避免与 proactive_adapter（函数级 import 本模块）形成运行时循环。
     from jiuwenswarm.server.runtime.proactive_adapter import ProactiveTriggerRequest
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
+from jiuwenswarm.common.config import get_config
+
 logger = logging.getLogger(__name__)
 
 # ── Rate limiting ────────────────────────────────────────────────
@@ -182,10 +187,19 @@ def _get_all_skills() -> tuple[set[str], list[dict[str, Any]]]:
             from jiuwenswarm.server.runtime.skill.skilldev import (
                 load_execution_disabled_skills,
             )
-            disabled = set(load_execution_disabled_skills())
+            disabled = set(
+                compose_parent_disabled_skill_names(
+                    get_config(),
+                    load_execution_disabled_skills(),
+                )
+            )
         except Exception as exc:
             logger.debug("[ProactiveEngine] load disabled skills failed: %s", exc)
-            disabled = set()
+            # Browser-only routing is independent from the persisted library
+            # kill switch, so preserve it even if state loading fails.
+            disabled = set(
+                compose_parent_disabled_skill_names(get_config())
+            )
         if disabled:
             skills = [s for s in skills if s.get("name") not in disabled]
 

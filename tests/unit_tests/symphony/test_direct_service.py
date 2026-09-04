@@ -341,6 +341,11 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
                 "capability_type": "skill",
                 "name": "Disabled",
             },
+            {
+                "capability_id": "browser-task",
+                "capability_type": "skill",
+                "name": "Browser Task",
+            },
         ],
         "nodes": [
             {
@@ -361,6 +366,12 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
                 "label": "Disabled",
                 "properties": {},
             },
+            {
+                "id": "capability:browser-task",
+                "type": "capability",
+                "label": "Browser Task",
+                "properties": {},
+            },
         ],
         "edges": [
             {
@@ -371,6 +382,11 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
             {
                 "source": "capability:writer",
                 "target": "capability:disabled",
+                "type": "can_feed",
+            },
+            {
+                "source": "capability:writer",
+                "target": "capability:browser-task",
                 "type": "can_feed",
             },
         ],
@@ -386,6 +402,16 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.load_execution_disabled_skills",
         lambda: {"disabled"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.get_config",
+        lambda: {
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task"]},
+                }
+            }
+        },
     )
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.load_dynamic_overlay",
@@ -522,7 +548,14 @@ async def test_service_plans_through_public_runtime_with_minimal_jgf(
     )
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.get_config",
-        lambda: {"preferred_language": "zh"},
+        lambda: {
+            "preferred_language": "zh",
+            "react": {
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task"]},
+                }
+            },
+        },
     )
     monkeypatch.setattr(
         "jiuwenswarm.symphony.service.load_execution_disabled_skills",
@@ -537,7 +570,7 @@ async def test_service_plans_through_public_runtime_with_minimal_jgf(
     result = await service.plan(
         "write",
         mode="beam",
-        candidate_skill_ids=["writer", "writer"],
+        candidate_skill_ids=["writer", "browser-task", "writer"],
         progress=progress,
     )
 
@@ -546,7 +579,7 @@ async def test_service_plans_through_public_runtime_with_minimal_jgf(
         "planned_graph": _minimal_planned_graph(),
     }
     assert captured["candidate_ids"] == ["writer"]
-    assert captured["disabled_capability_ids"] == {"disabled"}
+    assert captured["disabled_capability_ids"] == {"browser-task", "disabled"}
     assert captured["dynamic_overlay"]["edges"]
     assert captured["language"] == "cn"
     assert captured["mode"] == "beam"

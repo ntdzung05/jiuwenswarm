@@ -43,11 +43,18 @@ from openjiuwen.agent_teams.skill import (
     FileSkillVisibilityProvider,
     build_skill_visibility_provider,
 )
+from openjiuwen.agent_teams.rails.elements import (
+    build_team_skill_use_rail as build_core_team_skill_use_rail,
+)
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
 from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
 )
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.utils import get_agent_workspace_dir, get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
@@ -81,12 +88,16 @@ def build_member_skill_visibility_provider(
     member_name = str(ctx.member_name or "").strip()
     if not member_path:
         return None
+
+    def load_parent_disabled_skills() -> list[str]:
+        return _load_parent_disabled_skills(ctx)
+
     return build_skill_visibility_provider(
         member_path=member_path,
         member_id=member_name or ctx.team_id,
         team_path=team_path,
         team_id=ctx.team_id,
-        global_disabled_loader=_load_global_disabled_skills,
+        global_disabled_loader=load_parent_disabled_skills,
     )
 
 
@@ -111,8 +122,55 @@ def compose_member_skill_visibility(
     """
     provider = build_member_skill_visibility_provider(ctx)
     if provider is None:
-        return set(), set(_load_global_disabled_skills())
+        return set(), set(_load_parent_disabled_skills(ctx))
     return provider()
+
+
+def _load_parent_disabled_skills(ctx: SwarmBuildContext) -> list[str]:
+    """Compose live library and browser-child-only routing policy.
+
+    Platform-created contexts carry the config snapshot used to assemble the
+    team.  Re-read the process config for every visibility decision so an
+    existing TeamSkillUseRail follows hot changes to the browser child's Skill
+    scope.  A legacy or synthetic context without a config, and a transient
+    config read failure, retain the last construction-time policy.
+    """
+
+    routing_config = ctx.config
+    if isinstance(routing_config, dict):
+        try:
+            latest_config = get_config()
+        except Exception as exc:
+            logger.debug(
+                "[swarm.skills] live browser Skill routing config read failed: %s",
+                exc,
+            )
+        else:
+            if isinstance(latest_config, dict):
+                routing_config = latest_config
+    return compose_parent_disabled_skill_names(
+        routing_config,
+        _load_global_disabled_skills(),
+    )
+
+
+def build_member_team_skill_use_rail(params: dict, ctx: Any) -> object | None:
+    """Build core's team rail, then apply Jiuwen's parent-local visibility.
+
+    Core remains the sole writer of the member visibility document.  Jiuwen
+    only replaces the live provider after construction so browser-only Skills
+    are hidden from parents without being persisted as a global disable.
+    """
+
+    rail = build_core_team_skill_use_rail(params, ctx)
+    if rail is None or not isinstance(ctx, SwarmBuildContext):
+        return rail
+    provider = build_member_skill_visibility_provider(ctx)
+    if provider is None:
+        return rail
+    rail.visibility_provider = provider
+    rail._apply_visibility()
+    return rail
 
 
 def _load_global_disabled_skills() -> list[str]:
@@ -228,6 +286,7 @@ def build_member_skill_toolkit(params: dict, ctx: Any) -> object | None:
 __all__ = [
     "MEMBER_SKILL_TOOLKIT",
     "build_member_skill_visibility_provider",
+    "build_member_team_skill_use_rail",
     "build_member_skill_toolkit",
     "compose_member_skill_visibility",
 ]

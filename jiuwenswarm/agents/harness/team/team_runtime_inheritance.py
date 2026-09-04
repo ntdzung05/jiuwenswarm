@@ -30,6 +30,9 @@ from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
@@ -49,6 +52,16 @@ from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
+
+
+def _load_parent_disabled_skills(config: dict[str, Any] | None) -> list[str]:
+    """Return global disables plus transient browser-child routing denies."""
+
+    routing_config = config if isinstance(config, dict) else get_config()
+    return compose_parent_disabled_skill_names(
+        routing_config,
+        load_execution_disabled_skills(),
+    )
 
 
 @dataclass
@@ -287,7 +300,7 @@ def build_member_rails(
                 member_role=role,
                 auto_save=evolution_auto_save,
                 team_id=team_id,
-                disabled_skills=load_execution_disabled_skills(),
+                disabled_skills=_load_parent_disabled_skills(config),
                 trajectory_span_processor=(
                     team_trajectory_span_processor or get_trajectory_span_processor()
                 ),
@@ -544,7 +557,7 @@ def build_skill_evolution_rail(
             signal_trigger=True,
             auto_save=True,
             review_trigger=False,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=_load_parent_disabled_skills(config),
             trajectory_span_processor=(
                 trajectory_span_processor or get_trajectory_span_processor()
             ),

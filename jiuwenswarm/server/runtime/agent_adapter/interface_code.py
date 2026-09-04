@@ -71,6 +71,8 @@ from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    build_browser_agent_skill_rail,
+    normalize_browser_agent_skill_names,
 )
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
@@ -107,6 +109,7 @@ from jiuwenswarm.common.task_loop_config import (
 )
 from jiuwenswarm.common.runtime_workspace import resolve_runtime_workspace_paths
 from jiuwenswarm.common.utils import (
+    get_agent_skills_dir,
     get_agent_workspace_dir,
 )
 
@@ -1339,6 +1342,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             ):
                 setattr(self, name, None)
         self._sync_active_evolution_review_agent_after_reload()
+        # SkillUseRail persists a per-session baseline.  A Spec reload replaces
+        # the rail instance, but that baseline otherwise survives and can
+        # reintroduce a Skill that the new parent rail (for example a newly
+        # browser-child-only Skill) now excludes.
+        self._clear_skill_session_baseline()
 
         # Reconcile capability groups which are configured outside
         # modes.code.tools, then merge their cards with the Spec-owned set.
@@ -1954,18 +1962,29 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                         "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
+                browser_skill_names = normalize_browser_agent_skill_names(
+                    browser_agent_cfg
+                )
+                browser_skill_rail = build_browser_agent_skill_rail(
+                    get_agent_skills_dir(),
+                    browser_skill_names,
+                )
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,
                     sys_operation=sys_operation,
                     language=resolved_language,
+                    rails=[browser_skill_rail] if browser_skill_rail else None,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
                         DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     ),
                 )
                 self._prepare_browser_runtime_security(browser_spec)
-                browser_spec.factory_kwargs["auto_create_workspace"] = False
+                browser_spec.factory_kwargs = {
+                    **(browser_spec.factory_kwargs or {}),
+                    "auto_create_workspace": False,
+                }
                 subagents.append(browser_spec)
 
         # ── 自定义 agent 不加入 deep_config.subagents ──

@@ -41,6 +41,7 @@ from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    normalize_browser_agent_skill_names,
 )
 from jiuwenswarm.common.config import (
     get_default_model_provider,
@@ -314,7 +315,7 @@ def _team_skill_use_rail_spec(config: dict[str, Any], role: str) -> RailSpec:
 def _collapse_skill_use_rails(
     rails: list[RailSpec], *, retrieval_enabled: bool
 ) -> list[RailSpec]:
-    """Keep exactly one Skill rail, the first declared one.
+    """Keep exactly one team-scoped Skill rail, the first declared one.
 
     A member must never mount two Skill rails: they scan the same library and
     register the same ``skill`` / ``list_skill`` tools, which costs a duplicate
@@ -322,6 +323,13 @@ def _collapse_skill_use_rails(
     base spec's rails come first, so a blueprint that declares its own Skill
     rail wins over the one this module appends — the same precedence
     ``openjiuwen.agent_teams.skill.rail_spec`` applies on the team side.
+
+    Every supported generic alias is normalized to ``core.team.skill_use``.
+    Keeping a generic provider here would bypass the member/team visibility
+    provider (including browser-child-only exclusions) while still suppressing
+    the scoped rail appended by this module. Parameters remain owned by the
+    winning declaration; the team completion pass later fills only missing
+    member-identity parameters.
 
     When agentic retrieval is on, the survivor is additionally pinned to
     auto-list: the model discovers Skills through the retrieval tools instead
@@ -342,11 +350,13 @@ def _collapse_skill_use_rails(
             if has_skill_rail:
                 continue
             has_skill_rail = True
+            update: dict[str, Any] = {"type": TEAM_SKILL_USE}
             if retrieval_enabled:
                 params = dict(rail.params or {})
                 params["skill_mode"] = SkillUseRail.SKILL_MODE_AUTO_LIST
                 params["include_tools"] = False
-                rail = rail.model_copy(update={"params": params})
+                update["params"] = params
+            rail = rail.model_copy(update=update)
             collapsed.append(rail)
             continue
         collapsed.append(rail)
@@ -735,14 +745,18 @@ def _code_subagent_spec(
     card_kwargs: dict[str, Any] = {"name": name}
     if name == "statusline-setup":
         card_kwargs["id"] = "jiuwenswarm.statusline-setup"
+    factory_kwargs: dict[str, Any] = {
+        "max_iterations": int(max_iterations),
+        "language": language,
+    }
+    if name == "browser_agent":
+        factory_kwargs["skills"] = normalize_browser_agent_skill_names(sub_cfg)
+
     return SubAgentSpec(
         agent_card=AgentCard(**card_kwargs),
         system_prompt="",
         factory_name=factory_name,
-        factory_kwargs={
-            "max_iterations": int(max_iterations),
-            "language": language,
-        },
+        factory_kwargs=factory_kwargs,
     )
 
 

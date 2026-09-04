@@ -108,6 +108,12 @@ async def test_code_reload_resolves_and_applies_spec_without_replacing_agent(
         "_sync_active_evolution_review_agent_after_reload",
         MagicMock(),
     )
+    clear_skill_baseline = MagicMock()
+    monkeypatch.setattr(
+        adapter,
+        "_clear_skill_session_baseline",
+        clear_skill_baseline,
+    )
     sync_multimodal = MagicMock()
     sync_paid_search = MagicMock()
     sync_symphony = MagicMock()
@@ -159,6 +165,7 @@ async def test_code_reload_resolves_and_applies_spec_without_replacing_agent(
     sync_symphony.assert_called_once_with(config_base)
     sync_skill_retrieval.assert_called_once_with(config_base)
     sync_skill_prompt.assert_awaited_once_with(config_base)
+    clear_skill_baseline.assert_called_once_with()
 
 
 @pytest.mark.asyncio

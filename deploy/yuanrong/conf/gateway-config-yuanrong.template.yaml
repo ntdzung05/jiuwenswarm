@@ -370,6 +370,9 @@ react:
       # max_iterations: 15
     browser_agent:
       enabled: true
+      # 只在 Browser Agent 子代理中加载；不从父 Agent 继承 Skill。
+      skills:
+        - browser-task
       # max_iterations: 15
   answer_chunk_size: 500
   stream_chunk_threshold: 50

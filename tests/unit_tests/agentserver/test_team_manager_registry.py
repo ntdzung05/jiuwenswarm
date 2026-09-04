@@ -75,6 +75,17 @@ class _FakeTeamSkillCreateRail:
     pass
 
 
+class _GetterOnlyDisabledSkillsRail:
+    def __init__(self, disabled_skills: set[str]) -> None:
+        self._disabled_skills = disabled_skills
+        self.disabled_skills_reads = 0
+
+    @property
+    def disabled_skills(self) -> set[str]:
+        self.disabled_skills_reads += 1
+        return self._disabled_skills
+
+
 class _FakeAgent:
     def __init__(self) -> None:
         self.unregistered: list[object] = []
@@ -223,6 +234,88 @@ async def test_update_evolution_config_applies_fixed_team_trigger_policy() -> No
     assert manager.get_team_skill_rail("sess-1") is rail
     assert rail.signal_trigger is False
     assert rail.review_trigger is True
+
+
+@pytest.mark.asyncio
+async def test_update_evolution_config_refreshes_all_live_evolution_denies_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamManager()
+    team_disabled = {"stale-team"}
+    member_disabled = {"stale-member"}
+    live_only_disabled = {"stale-live"}
+    team_rail = _GetterOnlyDisabledSkillsRail(team_disabled)
+    member_rail = _GetterOnlyDisabledSkillsRail(member_disabled)
+    live_only_rail = _GetterOnlyDisabledSkillsRail(live_only_disabled)
+    first_agent = _FakeAgent()
+    second_agent = _FakeAgent()
+
+    manager.register_team_skill_rail("sess-1", team_rail)
+    manager.register_team_member_skill_evolution_rail("sess-1", member_rail)
+    manager.register_team_live_rail("sess-1", first_agent, team_rail)
+    manager.register_team_live_rail("sess-1", first_agent, member_rail)
+    manager.register_team_live_rail("sess-1", first_agent, live_only_rail)
+    # A rail may be reachable through more than one registry or owner. It must
+    # still receive only one in-place replacement per reload.
+    manager.register_team_live_rail("sess-2", second_agent, team_rail)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.SkillEvolutionRail",
+        _GetterOnlyDisabledSkillsRail,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.load_execution_disabled_skills",
+        lambda: ["library-disabled"],
+    )
+
+    await manager.update_evolution_config(
+        {
+            "react": {
+                "evolution": {"skill_evolution": True},
+                "subagents": {
+                    "browser_agent": {"skills": ["browser-task", "browser-extra"]}
+                },
+            }
+        }
+    )
+
+    expected = {"browser-extra", "browser-task", "library-disabled"}
+    assert team_rail._disabled_skills is team_disabled
+    assert member_rail._disabled_skills is member_disabled
+    assert live_only_rail._disabled_skills is live_only_disabled
+    assert team_disabled == expected
+    assert member_disabled == expected
+    assert live_only_disabled == expected
+    assert team_rail.disabled_skills_reads == 1
+    assert member_rail.disabled_skills_reads == 1
+    assert live_only_rail.disabled_skills_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_update_evolution_config_loads_current_config_when_snapshot_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamManager()
+    original_disabled = {"stale-disabled"}
+    rail = _GetterOnlyDisabledSkillsRail(original_disabled)
+    manager.register_team_skill_rail("sess-1", rail)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {
+            "react": {
+                "evolution": {"skill_evolution": True},
+                "subagents": {"browser_agent": {"skills": ["browser-task"]}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.load_execution_disabled_skills",
+        lambda: ["library-disabled"],
+    )
+
+    await manager.update_evolution_config(None)
+
+    assert rail._disabled_skills is original_disabled
+    assert original_disabled == {"browser-task", "library-disabled"}
 
 
 @pytest.mark.asyncio
@@ -492,7 +585,7 @@ async def test_update_evolution_config_skill_create_enabled_mounts_missing_team_
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_config",
-        lambda: {"react": {"evolution": {"skill_evolution": True}}},
+        lambda: {"react": {"evolution": {"skill_evolution": False}}},
     )
 
     def _fake_build_member_rails(**kwargs):
@@ -514,6 +607,64 @@ async def test_update_evolution_config_skill_create_enabled_mounts_missing_team_
 
     assert isinstance(manager.get_team_skill_create_rail("sess-1"), _FakeTeamSkillCreateRail)
     assert len(agent.added_rails) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_only_rebuild_does_not_duplicate_leader_evolution_rails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jiuwenswarm.agents.harness.team.team_manager as team_manager_module
+
+    manager = TeamManager()
+    agent = _FakeAgent()
+    context = TeamRailMountContext(
+        agent=agent,
+        member_info=MemberInfo(role="leader"),
+        runtime=RuntimeInfo(channel="web"),
+        team_workspace=TeamWorkspaceInfo(team_id="demo-team", config={}),
+    )
+    manager.register_team_rail_context("sess-1", context)
+
+    class _MemberEvolutionRail:
+        pass
+
+    class _TeamEvolutionRail(_MemberEvolutionRail):
+        pass
+
+    class _InterruptRail:
+        pass
+
+    class _CreateRail:
+        pass
+
+    existing_team_rail = _TeamEvolutionRail()
+    rebuilt_team_rail = _TeamEvolutionRail()
+    rebuilt_interrupt_rail = _InterruptRail()
+    rebuilt_create_rail = _CreateRail()
+    manager.register_team_skill_rail("sess-1", existing_team_rail)
+    monkeypatch.setattr(team_manager_module, "SkillEvolutionRail", _MemberEvolutionRail)
+    monkeypatch.setattr(team_manager_module, "TeamSkillEvolutionRail", _TeamEvolutionRail)
+    monkeypatch.setattr(team_manager_module, "EvolutionInterruptRail", _InterruptRail)
+    monkeypatch.setattr(team_manager_module, "TeamSkillCreateRail", _CreateRail)
+    monkeypatch.setattr(
+        team_manager_module,
+        "build_member_rails",
+        lambda **_kwargs: [
+            rebuilt_interrupt_rail,
+            rebuilt_team_rail,
+            rebuilt_create_rail,
+        ],
+    )
+
+    await manager.update_evolution_config(
+        {"react": {"evolution": {"skill_evolution": True}}}
+    )
+
+    assert manager.get_team_skill_rail("sess-1") is existing_team_rail
+    assert manager.get_team_skill_create_rail("sess-1") is rebuilt_create_rail
+    assert manager._team_member_skill_evolution_rails.get("sess-1") is None
+    assert agent.added_rails == [rebuilt_create_rail]
+    assert manager._team_live_rails["sess-1"] == [(agent, rebuilt_create_rail)]
 
 
 @pytest.mark.asyncio

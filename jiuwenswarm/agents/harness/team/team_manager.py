@@ -27,6 +27,9 @@ from openjiuwen.harness.rails import (
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
@@ -81,6 +84,7 @@ from jiuwenswarm.observability.runtime import (
     sync_trajectory_runtime,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +103,29 @@ _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
 TEAM_EVENT_QUEUE_MAXSIZE = 64
 _WAITER_PUT_RECHECK_TIMEOUT_SEC = 0.1
 _TEAM_ROUND_FINAL_GRACE_SECONDS = 2.0
+
+
+def _replace_evolution_disabled_skills(
+    rail: Any,
+    disabled_skills: set[str],
+) -> bool:
+    """Replace a live evolution rail's getter-only deny-list in place."""
+
+    try:
+        current = getattr(rail, "disabled_skills", None)
+        if not isinstance(current, set):
+            return False
+        if current != disabled_skills:
+            current.clear()
+            current.update(disabled_skills)
+        return True
+    except Exception as exc:
+        logger.debug(
+            "[TeamManager] evolution disabled_skills update failed: rail=%s error=%s",
+            type(rail).__name__,
+            exc,
+        )
+        return False
 
 
 def _safe_payload_preview(payload: Any) -> str:
@@ -1794,9 +1821,10 @@ class TeamManager:
         mount_team_skill_rail: bool,
         mount_team_skill_create_rail: bool,
         mount_skill_evolution_rail: bool,
+        config: dict[str, Any] | None = None,
     ) -> tuple[Any | None, Any | None]:
         """Rebuild team rails for a session using the stored mount context."""
-        latest_config = get_config()
+        latest_config = config if isinstance(config, dict) else get_config()
         context.team_workspace.config = latest_config
         member_rails = build_member_rails(
             member_info=context.member_info,
@@ -1806,10 +1834,14 @@ class TeamManager:
         team_skill_rail: Any | None = None
         team_skill_create_rail: Any | None = None
         for rail in member_rails:
-            if isinstance(rail, TeamSkillEvolutionRail) and mount_team_skill_rail:
-                context.agent.add_rail(rail)
-                self.register_team_live_rail(session_id, context.agent, rail)
-                team_skill_rail = rail
+            if isinstance(rail, TeamSkillEvolutionRail):
+                # TeamSkillEvolutionRail subclasses SkillEvolutionRail. Keep
+                # this branch exclusive even when the team rail already exists
+                # so a create-only rebuild cannot mount it as a member rail.
+                if mount_team_skill_rail:
+                    context.agent.add_rail(rail)
+                    self.register_team_live_rail(session_id, context.agent, rail)
+                    team_skill_rail = rail
             elif isinstance(rail, EvolutionInterruptRail) and (
                 mount_team_skill_rail or mount_skill_evolution_rail
             ):
@@ -1832,13 +1864,15 @@ class TeamManager:
 
     async def update_evolution_config(self, config: dict[str, Any] | None) -> None:
         """Hot-update team evolution rails for existing team runtimes."""
-        enabled = get_skill_evolution_enabled(config)
-        auto_save = get_evolution_auto_save_enabled(config)
+        effective_config = config if isinstance(config, dict) else get_config()
+        enabled = get_skill_evolution_enabled(effective_config)
+        auto_save = get_evolution_auto_save_enabled(effective_config)
         known_sessions = set(self._team_rail_contexts)
         known_sessions.update(self._team_member_rail_contexts)
         known_sessions.update(self._team_skill_rails)
         known_sessions.update(self._team_skill_create_rails)
         known_sessions.update(self._team_member_skill_evolution_rails)
+        known_sessions.update(self._team_live_rails)
         for session_id in known_sessions:
             self._team_evolution_enabled[session_id] = enabled
 
@@ -1887,7 +1921,8 @@ class TeamManager:
                 context,
                 mount_team_skill_rail=not has_team_rail,
                 mount_team_skill_create_rail=not has_create_rail,
-                mount_skill_evolution_rail=True,
+                mount_skill_evolution_rail=False,
+                config=effective_config,
             )
         for session_id, contexts in list(self._team_member_rail_contexts.items()):
             for context in contexts:
@@ -1899,7 +1934,36 @@ class TeamManager:
                     mount_team_skill_rail=False,
                     mount_team_skill_create_rail=False,
                     mount_skill_evolution_rail=True,
+                    config=effective_config,
                 )
+
+        # Reconcile every registered Skill evolution rail after rebuilds so the
+        # same config snapshot controls both newly mounted and existing rails.
+        # The live registry also contains interrupts and TeamSkillCreateRail,
+        # so only use its SkillEvolutionRail entries as a fallback.
+        parent_disabled_skills = set(
+            compose_parent_disabled_skill_names(
+                effective_config,
+                load_execution_disabled_skills(),
+            )
+        )
+        registered_rails: list[Any] = list(self._team_skill_rails.values())
+        for rails in self._team_member_skill_evolution_rails.values():
+            registered_rails.extend(rails)
+        for live_rails in self._team_live_rails.values():
+            registered_rails.extend(
+                rail
+                for _agent, rail in live_rails
+                if isinstance(rail, SkillEvolutionRail)
+            )
+
+        visited_rails: set[int] = set()
+        for rail in registered_rails:
+            rail_id = id(rail)
+            if rail_id in visited_rails:
+                continue
+            visited_rails.add(rail_id)
+            _replace_evolution_disabled_skills(rail, parent_disabled_skills)
 
     async def destroy_team(self, session_id: str) -> bool:
         async with self._bootstrap_lock:

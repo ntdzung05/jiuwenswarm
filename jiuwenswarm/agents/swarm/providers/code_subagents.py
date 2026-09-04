@@ -43,6 +43,8 @@ from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    build_browser_agent_skill_rail,
+    normalize_browser_agent_skill_names,
 )
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.providers.code_rails import (
@@ -53,6 +55,7 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS,
     build_statusline_setup_agent_config,
 )
+from jiuwenswarm.common.utils import get_agent_skills_dir
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +163,10 @@ class BrowserAgentInput(ConstructionInput):
         default=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
         description="Maximum task-loop iterations for the sub-agent.",
     )
+    skills: list[str] = param_field(
+        default_factory=list,
+        description="Exact Skill names statically enabled for the browser child.",
+    )
     workspace_root: str | None = context_field(
         resolver=_workspace_root,
         description="Member workspace root (defaults to ./ when absent).",
@@ -221,10 +228,20 @@ def build_swarm_browser_agent(factory_kwargs: dict[str, Any], ctx: SwarmBuildCon
         return None
 
     browser_key = _browser_key(inp.session_id, inp.member_name, inp.role)
+    browser_skill_names = normalize_browser_agent_skill_names(
+        {"skills": inp.skills}
+    )
+    skills_root = ctx.global_skills_dir or str(get_agent_skills_dir())
+    browser_skill_rail = build_browser_agent_skill_rail(
+        skills_root,
+        browser_skill_names,
+    )
     spec = build_browser_agent_config(
         model,
         workspace=str(inp.workspace_root or "./"),
+        sys_operation=parent_sys_operation(ctx),
         language=inp.language,
+        rails=[browser_skill_rail] if browser_skill_rail else None,
         max_iterations=inp.max_iterations,
         browser_key=browser_key,
     )

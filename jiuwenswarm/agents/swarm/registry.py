@@ -42,7 +42,9 @@ from openjiuwen.agent_teams.rails.subagent_elements import (
     EXPLORE_AGENT as _OJ_EXPLORE_AGENT,
     PLAN_AGENT as _OJ_PLAN_AGENT,
 )
+from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE as _OJ_TEAM_SKILL_USE
 from openjiuwen.agent_teams.schema.build_context import register_build_context_factory
+from openjiuwen.harness.schema.deep_agent_spec import register_rail_provider
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.providers import (
@@ -174,6 +176,14 @@ def register_swarm_providers() -> None:
     # worktree / lsp / explore_agent / ...) are declared and registered.
     ensure_harness_elements_registered()
     register_from_catalog()
+    # The core provider remains responsible for construction and declaration
+    # seeding; Jiuwen's wrapper only adds its browser-child parent exclusion to
+    # the live visibility provider. Register after the catalog so it wins the
+    # shared provider name without creating a second Skill rail.
+    register_rail_provider(
+        _OJ_TEAM_SKILL_USE,
+        _skills.build_member_team_skill_use_rail,
+    )
     register_build_context_factory(_build_swarm_context_from_seed)
 
     _REGISTERED = True

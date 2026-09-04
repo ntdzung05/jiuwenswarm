@@ -737,6 +737,7 @@ def _install_default_builtin_skills(
     - swarmskill-creator: Swarm技能创建助手（由 skill-creator 路由选中）
     - skill-omni-creation: 链接/网页/视频技能创建助手（由 skill-creator 路由选中）
     - huawei-cloud-maas-setup: 华为云MaaS购买与配置引导
+    - browser-task: 仅供 browser_agent 按配置加载的浏览器工作流程
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -752,7 +753,8 @@ def _install_default_builtin_skills(
         "skill-omni-creation",
         "huawei-cloud-maas-setup",
         "agent-creator",
-        "plugin-creator"
+        "plugin-creator",
+        "browser-task",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -819,6 +821,7 @@ def ensure_default_builtin_skills() -> None:
         "swarmskill-creator",
         "skill-omni-creation",
         "huawei-cloud-maas-setup",
+        "browser-task",
     ]
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)

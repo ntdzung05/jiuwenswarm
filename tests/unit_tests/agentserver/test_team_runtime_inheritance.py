@@ -322,6 +322,18 @@ def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.load_execution_disabled_skills",
+        lambda: ["library-disabled"],
+    )
+    evolution_config = {
+        "react": {
+            "evolution": {"skill_evolution": True},
+            "subagents": {
+                "browser_agent": {"skills": ["browser-task"]},
+            },
+        }
+    }
 
     leader_rails = build_member_rails(
         member_info=MemberInfo(role="leader"),
@@ -330,7 +342,7 @@ def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
             trajectory_span_processor=processor,
-            config={"react": {"evolution": {"skill_evolution": True}}},
+            config=evolution_config,
         ),
     )
     member_rails = build_member_rails(
@@ -340,7 +352,7 @@ def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
             trajectory_span_processor=processor,
-            config={"react": {"evolution": {"skill_evolution": True}}},
+            config=evolution_config,
         ),
     )
 
@@ -358,7 +370,15 @@ def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
     # Skills live in exactly one physical library; the team workspace no longer
     # contributes a second root.
     assert leader_rail.kwargs["skills_dir"] == str(global_skills_dir)
+    assert leader_rail.kwargs["disabled_skills"] == [
+        "browser-task",
+        "library-disabled",
+    ]
     assert member_rail.kwargs["trajectory_span_processor"] is processor
+    assert member_rail.kwargs["disabled_skills"] == [
+        "browser-task",
+        "library-disabled",
+    ]
     assert member_rail.kwargs["signal_trigger"] is True
     assert member_rail.kwargs["skills_dir"] == str(global_skills_dir)
 

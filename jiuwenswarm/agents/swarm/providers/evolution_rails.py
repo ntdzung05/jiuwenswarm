@@ -37,6 +37,9 @@ from openjiuwen.harness.rails import (
 )
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import (
     get_evolution_review_feedback_min_confidence,
@@ -560,7 +563,10 @@ def build_team_skill_evolution_rail(
             member_role=inp.role,
             auto_save=inp.auto_save,
             team_id=inp.team_id,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=compose_parent_disabled_skill_names(
+                ctx.config,
+                load_execution_disabled_skills(),
+            ),
             trajectory_span_processor=(
                 inp.trajectory_span_processor or get_trajectory_span_processor()
             ),
@@ -780,7 +786,10 @@ def build_member_skill_evolution_rail(
             signal_trigger=True,
             auto_save=True,
             review_trigger=False,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=compose_parent_disabled_skill_names(
+                ctx.config,
+                load_execution_disabled_skills(),
+            ),
             trajectory_span_processor=(
                 inp.trajectory_span_processor or get_trajectory_span_processor()
             ),

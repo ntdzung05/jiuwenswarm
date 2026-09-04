@@ -819,26 +819,159 @@ def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) ->
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
-def test_team_member_deep_agent_spec_normalizes_existing_skill_use_rail(role: str) -> None:
-    """Chat-team members normalize an existing skill rail to auto-list mode."""
+@pytest.mark.parametrize(
+    "skill_rail_type",
+    [CORE_SKILL_USE, TEAM_SKILL_USE, "skill_use", "SkillUseRail"],
+)
+def test_team_member_deep_agent_spec_normalizes_existing_skill_use_rail(
+    role: str,
+    skill_rail_type: str,
+) -> None:
+    """Every Skill rail alias resolves through the team visibility provider."""
     base = DeepAgentSpec(
         enable_skill_discovery=False,
         rails=[
             RailSpec(
-                type="SkillUseRail",
-                params={"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+                type=skill_rail_type,
+                params={
+                    "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+                    "skills_dir": ["/custom/global-skills"],
+                    "bootstrap_allow": ["base-skill"],
+                    "team_name": "custom-team",
+                },
             )
         ],
     )
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
-    skill_rails = [rail for rail in (spec.rails or []) if rail.type in {CORE_SKILL_USE, "SkillUseRail"}]
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type == TEAM_SKILL_USE]
 
     assert spec.enable_skill_discovery is False
     assert len(skill_rails) == 1
-    assert skill_rails[0].type == "SkillUseRail"
     assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
     assert skill_rails[0].params["include_tools"] is False
+    assert skill_rails[0].params["skills_dir"] == ["/custom/global-skills"]
+    assert skill_rails[0].params["bootstrap_allow"] == ["base-skill"]
+    assert skill_rails[0].params["team_name"] == "custom-team"
+
+
+@pytest.mark.asyncio
+async def test_base_skill_rail_materializes_with_browser_child_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base generic rail cannot bypass the parent-only Skill deny-list."""
+    from openjiuwen.agent_teams.skill.rail_spec import (
+        complete_declared_team_skill_rails,
+    )
+
+    from jiuwenswarm.agents.swarm.providers import skills as skills_provider
+
+    library = tmp_path / "global-skills"
+    for name in ("ordinary-parent-skill", "browser-task"):
+        skill_dir = library / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {name} description\n---\n",
+            encoding="utf-8",
+        )
+
+    config = {
+        "react": {
+            "subagents": {
+                "browser_agent": {"skills": ["browser-task"]},
+            },
+        },
+    }
+    base = DeepAgentSpec(
+        enable_skill_discovery=False,
+        rails=[
+            RailSpec(
+                type=CORE_SKILL_USE,
+                params={
+                    "skills_dir": [str(library)],
+                    "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+                    "include_tools": False,
+                },
+            ),
+        ],
+    )
+    spec = build_member_deep_agent_spec(config, "team", "leader", base)
+    member_root = tmp_path / "member-workspace"
+    team_root = tmp_path / "team-workspace"
+    completed_rails = complete_declared_team_skill_rails(
+        list(spec.rails or []),
+        team_name="unit-team",
+        member_name="leader",
+        config_skills=[],
+        team_workspace_path=str(team_root),
+        member_workspace_path=str(member_root),
+    )
+    skill_spec = next(
+        rail_spec for rail_spec in completed_rails if rail_spec.type == TEAM_SKILL_USE
+    )
+
+    monkeypatch.setattr(skills_provider, "_load_global_disabled_skills", list)
+    monkeypatch.setattr(skills_provider, "get_config", lambda: config)
+    register_swarm_providers()
+    context = SwarmBuildContext(
+        config=config,
+        mode="team",
+        team_id="unit-team",
+        member_name="leader",
+        global_skills_dir=str(library),
+        team_skill_visibility_path=str(team_root / "skills-visibility.json"),
+        workspace=SimpleNamespace(root_path=str(member_root)),
+    )
+    rail = skill_spec.build(language="en", context=context)
+
+    class _Abilities:
+        def __init__(self) -> None:
+            self.cards: dict[str, object] = {}
+            self.tools: dict[str, object] = {}
+
+        def get(self, name: str) -> object | None:
+            return self.cards.get(name)
+
+        def add_ability(self, card: object, tool: object) -> SimpleNamespace:
+            name = str(getattr(card, "name"))
+            self.cards[name] = card
+            self.tools[name] = tool
+            return SimpleNamespace(added=True)
+
+    class _Session:
+        def __init__(self) -> None:
+            self.state: dict[str, object] = {}
+
+        def get_state(self, key: str) -> object | None:
+            return self.state.get(key)
+
+        def update_state(self, values: dict[str, object]) -> None:
+            self.state.update(values)
+
+    abilities = _Abilities()
+    builder = SystemPromptBuilder(language="en")
+    agent = SimpleNamespace(
+        ability_manager=abilities,
+        system_prompt_builder=builder,
+        prompt_attachment_manager=None,
+        card=SimpleNamespace(id="parent-agent"),
+        deep_config=SimpleNamespace(enable_read_image_multimodal=False),
+    )
+    rail.init(agent)
+    session = _Session()
+    await rail.before_invoke(AgentCallbackContext(agent=agent, session=session))
+
+    prompt = builder.build()
+    # Match rendered Skill identifiers rather than arbitrary path text in the
+    # fallback description (the pytest temp root itself may contain the Skill
+    # name, which must not make this isolation assertion fail).
+    assert "`ordinary-parent-skill`" in prompt
+    assert "`browser-task`" not in prompt
+    skill_tool = abilities.tools["skill_tool"]
+    result = await skill_tool.invoke({"skill_name": "browser-task"}, session=session)
+    assert result.success is False
+    assert result.error == "Skill not found: browser-task"
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -1126,7 +1259,7 @@ def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
 
 
 def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
-    """Provider rails are appended after a member's pre-existing rails."""
+    """Provider rails follow a normalized member-owned Skill rail."""
     monkeypatch.setattr(
         "jiuwenswarm.agents.swarm.config_specs._retrieval_enabled",
         lambda config=None: False,
@@ -1138,8 +1271,9 @@ def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
     enrich_team_spec_for_swarm(spec, session_id="s", mode="team", channel_id="web")
 
     leader_rail_types = [rail.type for rail in (spec.agents["leader"].rails or [])]
-    assert leader_rail_types[0] == "skill_use"
-    assert leader_rail_types.count("skill_use") == 1
+    assert leader_rail_types[0] == TEAM_SKILL_USE
+    assert leader_rail_types.count(TEAM_SKILL_USE) == 1
+    assert "skill_use" not in leader_rail_types
     assert len(leader_rail_types) > 1
 
 
@@ -1844,7 +1978,15 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         "_build_evolution_llm_from",
         lambda config: (object(), "model"),
     )
-    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+    monkeypatch.setattr(
+        evolution_rails,
+        "load_execution_disabled_skills",
+        lambda: ["library-disabled"],
+    )
+    config = _skill_evolution_config(auto_save=auto_save)
+    config["react"]["subagents"] = {
+        "browser_agent": {"skills": ["browser-task"]}
+    }
 
     ctx = SwarmBuildContext(
         language="cn",
@@ -1856,7 +1998,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         team_skill_visibility_path=str(tmp_path / "skills-visibility.json"),
         global_skills_dir=str(tmp_path / "global-skills"),
         trajectory_span_processor=object(),
-        config=_skill_evolution_config(auto_save=auto_save),
+        config=config,
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
@@ -1879,6 +2021,10 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.kwargs["disabled_skills"] == [
+        "browser-task",
+        "library-disabled",
+    ]
     assert rail.review_feedback_config["session_id"] == "sess"
     assert rail.review_feedback_config["team_id"] == "t"
     assert rail.review_feedback_config["min_confidence"] == 0.7
@@ -1959,7 +2105,15 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         "_build_evolution_llm_from",
         lambda config: (object(), "model"),
     )
-    monkeypatch.setattr(evolution_rails, "load_execution_disabled_skills", lambda: [])
+    monkeypatch.setattr(
+        evolution_rails,
+        "load_execution_disabled_skills",
+        lambda: ["library-disabled"],
+    )
+    config = _skill_evolution_config()
+    config["react"]["subagents"] = {
+        "browser_agent": {"skills": ["browser-task"]}
+    }
 
     processor_obj = object()
     ctx = SwarmBuildContext(
@@ -1971,7 +2125,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         team_skill_visibility_path=str(tmp_path / "skills-visibility.json"),
         global_skills_dir=str(tmp_path / "global-skills"),
         trajectory_span_processor=processor_obj,
-        config=_skill_evolution_config(),
+        config=config,
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
@@ -1988,6 +2142,10 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is True
     assert rail.kwargs["review_trigger"] is False
     assert rail.kwargs["auto_save"] is True
+    assert rail.kwargs["disabled_skills"] == [
+        "browser-task",
+        "library-disabled",
+    ]
     assert rail.kwargs["trajectory_span_processor"] is processor_obj
 
 
@@ -3088,7 +3246,16 @@ def test_browser_key_derivation() -> None:
 def test_browser_subagent_spec_included_when_enabled() -> None:
     """browser_agent SubAgentSpec uses SWARM_BROWSER_AGENT factory when enabled."""
     register_swarm_providers()
-    config = {"react": {"subagents": {"browser_agent": {"enabled": True}}}}
+    config = {
+        "react": {
+            "subagents": {
+                "browser_agent": {
+                    "enabled": True,
+                    "skills": ["browser-task"],
+                }
+            }
+        }
+    }
     subs = build_member_subagent_specs(config, "code.team", "leader")
     factory_names = [s.factory_name for s in subs]
     assert SWARM_BROWSER_AGENT in factory_names
@@ -3097,6 +3264,7 @@ def test_browser_subagent_spec_included_when_enabled() -> None:
         browser_spec.factory_kwargs["max_iterations"]
         == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
     )
+    assert browser_spec.factory_kwargs["skills"] == ["browser-task"]
 
 
 def test_browser_subagent_spec_honors_explicit_iteration_budget() -> None:
@@ -3145,7 +3313,7 @@ def test_browser_subagent_provider_skips_without_model(
         config={},
     )
     # No _parent_model in ctx.extras → provider must short-circuit to None.
-    result = build_swarm_browser_agent({}, ctx)
+    result = build_swarm_browser_agent({"skills": ["browser-task"]}, ctx)
     assert result is None
 
 
@@ -3164,6 +3332,8 @@ def test_browser_subagent_provider_passes_correct_browser_key(
         return spec
 
     monkeypatch.setattr(_cs, "build_browser_agent_config", _fake_build)
+    parent_operation = object()
+    monkeypatch.setattr(_cs, "parent_sys_operation", lambda ctx: parent_operation)
 
     fake_model = object()
     ctx = SwarmBuildContext(
@@ -3175,11 +3345,16 @@ def test_browser_subagent_provider_passes_correct_browser_key(
     )
     ctx.extras[_PARENT_MODEL_EXTRAS_KEY] = fake_model
 
-    result = build_swarm_browser_agent({}, ctx)
+    result = build_swarm_browser_agent({"skills": ["browser-task"]}, ctx)
 
     assert result is not None
     assert len(captured) == 1
     assert captured[0]["browser_key"] == "sess42-browser-usd-sgd"
+    assert captured[0]["sys_operation"] is parent_operation
+    assert "skills" not in captured[0]
+    assert len(captured[0]["rails"]) == 1
+    assert captured[0]["rails"][0].enabled_skills == {"browser-task"}
+    assert result.factory_kwargs["auto_create_workspace"] is False
     assert (
         captured[0]["max_iterations"]
         == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS

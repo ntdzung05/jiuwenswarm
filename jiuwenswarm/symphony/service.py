@@ -14,6 +14,9 @@ from typing import Any, Callable
 
 from openjiuwen.symphony import SymphonyRuntime, normalize_name_key
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    compose_parent_disabled_skill_names,
+)
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 from jiuwenswarm.symphony.adapter import (
@@ -35,6 +38,20 @@ logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Callable[[dict[str, Any]], Any]
+
+
+def _load_parent_disabled_skill_names(
+    config: dict[str, Any] | None = None,
+) -> set[str]:
+    """Return the live library and browser-child-only deny-list for Symphony."""
+
+    routing_config = get_config() if config is None else config
+    return set(
+        compose_parent_disabled_skill_names(
+            routing_config,
+            load_execution_disabled_skills(),
+        )
+    )
 
 
 class SwarmSymphonyService:
@@ -196,7 +213,7 @@ class SwarmSymphonyService:
                 artifact,
                 graph_dir=graph_dir,
                 min_edge_confidence=config.orchestration.min_edge_confidence,
-                disabled_skill_names=load_execution_disabled_skills(),
+                disabled_skill_names=_load_parent_disabled_skill_names(),
                 dynamic_overlay=(
                     load_dynamic_overlay(graph_dir)
                     if config.evolution.enabled
@@ -218,9 +235,17 @@ class SwarmSymphonyService:
         query = str(query or "").strip()
         if not query:
             return {"success": False, "detail": "query is required"}
+        runtime_config = get_config()
+        disabled_skill_names = _load_parent_disabled_skill_names(runtime_config)
         candidate_ids = candidate_ids_from_skill_ids(candidate_skill_ids)
+        if candidate_ids is not None:
+            candidate_ids = [
+                candidate_id
+                for candidate_id in candidate_ids
+                if candidate_id not in disabled_skill_names
+            ]
         language = _resolve_orchestration_language(
-            get_config().get("preferred_language", "zh")
+            runtime_config.get("preferred_language", "zh")
         )
         config = load_symphony_config()
         graph_dir = config.paths.graph_dir
@@ -258,7 +283,7 @@ class SwarmSymphonyService:
                 candidate_ids=candidate_ids,
                 language=language,
                 progress=progress,
-                disabled_capability_ids=load_execution_disabled_skills(),
+                disabled_capability_ids=disabled_skill_names,
                 dynamic_overlay=(
                     load_dynamic_overlay(graph_dir)
                     if config.evolution.enabled
